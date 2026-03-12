@@ -58,6 +58,7 @@ if not EMAIL_CATEGORIES:
         "Social Media": ["facebook", "instagram", "twitter", "tiktok", "reddit"],
         "Newsletters": ["substack", "medium", "newsletter", "digest"],
         "Promotions": ["sale", "coupon", "promo", "% off", "deal", "loyalty"],
+        "Family": ["rashna9@gmail.com", "harun.rashid68@yahoo.com", "harunur.rashid68@gmail.com", "laila.rashid1980@gmail.com"],
     }
 
 # Build the category list for the system prompt
