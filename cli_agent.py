@@ -1,5 +1,5 @@
 """
-CLI Orchestrator - LangChain agent that uses Gemini to triage Gmail via the
+CLI Orchestrator - LangChain agent that uses a local LLM to triage Gmail via the
 GmailOrganizer MCP server.
 """
 
@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import warnings
 warnings.filterwarnings("ignore", message="create_react_agent has been moved")
@@ -27,11 +27,9 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    sys.exit("ERROR: GOOGLE_API_KEY not found. Set it in a .env file or as an environment variable.")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen3-4b")
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GMAIL_SERVER_PATH = str(Path(__file__).parent / "gmail_server.py")
 PROJECT_DIR = str(Path(__file__).parent)
 
@@ -231,21 +229,7 @@ async def categorize_historical(agent, tools: list, history: list):
         print(f"  {name}: {', '.join(keywords[:5])}{'...' if len(keywords) > 5 else ''}")
     print(f"  Misc: (anything that doesn't match above)")
 
-    # Ask how many emails per batch
-    while True:
-        batch_input = input("\nHow many emails per batch? (default 50, max 200): ").strip()
-        if not batch_input:
-            batch_size = 50
-            break
-        try:
-            batch_size = int(batch_input)
-            if batch_size < 1:
-                print("Please enter a positive number.")
-                continue
-            batch_size = min(batch_size, 200)
-            break
-        except ValueError:
-            print("Invalid number.")
+    batch_size = 10
 
     # Ask if user wants approval per batch or auto-process all
     approval_choice = input("\nRequire approval before applying labels? (yes/no, default yes): ").strip().lower()
@@ -486,7 +470,7 @@ def _parse_label_mapping(text: str) -> list[dict] | None:
 
 async def main():
     print("=" * 60)
-    print("  Gmail Organizer - Powered by Gemini + MCP")
+    print("  Gmail Organizer - Powered by Local LLM + MCP")
     print("=" * 60)
 
     mcp_client = MultiServerMCPClient(MCP_SERVERS)
@@ -497,9 +481,10 @@ async def main():
     cat_names = list(EMAIL_CATEGORIES.keys()) + ["Misc"]
     print(f"Categories: {', '.join(cat_names)}")
 
-    llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
-        google_api_key=GOOGLE_API_KEY,
+    llm = ChatOpenAI(
+        base_url=LLM_BASE_URL,
+        api_key="not-needed",
+        model=LLM_MODEL,
         temperature=0.2,
     )
 
