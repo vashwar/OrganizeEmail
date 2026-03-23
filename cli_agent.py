@@ -481,6 +481,17 @@ async def main():
     cat_names = list(EMAIL_CATEGORIES.keys()) + ["Misc"]
     print(f"Categories: {', '.join(cat_names)}")
 
+    # Verify llama-server is reachable before proceeding
+    import urllib.request
+    import urllib.error
+    health_url = LLM_BASE_URL.rsplit("/v1", 1)[0] + "/health"
+    try:
+        urllib.request.urlopen(health_url, timeout=5)
+    except (urllib.error.URLError, OSError):
+        print(f"\nERROR: Cannot connect to LLM server at {LLM_BASE_URL}")
+        print("Make sure llama-server is running. Use start.bat to launch it automatically.")
+        return
+
     llm = ChatOpenAI(
         base_url=LLM_BASE_URL,
         api_key="not-needed",
