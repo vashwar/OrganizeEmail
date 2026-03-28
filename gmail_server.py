@@ -373,6 +373,10 @@ def fetch_historical_batch(
 
         return {
             "emails": _format_email_list(details),
+            "email_details": [
+                {"email_id": d["email_id"], "from": d["From"], "subject": d["Subject"], "snippet": d["Snippet"]}
+                for d in details
+            ],
             "nextPageToken": results.get("nextPageToken"),
             "count": len(details),
             "skipped": skipped,

@@ -29,6 +29,7 @@ load_dotenv()
 
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen3-4b")
+MAX_HISTORY_TOKENS = int(os.getenv("MAX_HISTORY_TOKENS", "3000"))
 
 GMAIL_SERVER_PATH = str(Path(__file__).parent / "gmail_server.py")
 PROJECT_DIR = str(Path(__file__).parent)
@@ -57,6 +58,7 @@ if not EMAIL_CATEGORIES:
         "Newsletters": ["substack", "medium", "newsletter", "digest"],
         "Promotions": ["sale", "coupon", "promo", "% off", "deal", "loyalty"],
         "Family": ["rashna9@gmail.com", "harun.rashid68@yahoo.com", "harunur.rashid68@gmail.com", "laila.rashid1980@gmail.com"],
+        "NewsSummary": ["onboarding@resend.dev"],
     }
 
 # Build the category list for the system prompt
@@ -120,6 +122,9 @@ MCP_SERVERS = {
 async def run_agent(user_message: str, agent, history: list) -> str:
     """Invoke the agent and return its final text response."""
     history.append({"role": "user", "content": user_message})
+
+    # Trim history to stay within local model's context limits
+    _trim_history(history)
 
     response = await agent.ainvoke({"messages": history})
 
@@ -289,6 +294,7 @@ async def categorize_historical(agent, tools: list, history: list):
                 result = {"emails": str(raw_result), "nextPageToken": None, "count": 0, "skipped": 0}
 
         emails_text = result.get("emails", "No emails found.")
+        email_details = result.get("email_details", [])
         next_page_token = result.get("nextPageToken")
         count = result.get("count", 0)
         skipped = result.get("skipped", 0)
@@ -306,35 +312,82 @@ async def categorize_historical(agent, tools: list, history: list):
                 print("\n--- No more uncategorized emails. Done! ---")
                 break
 
-        # Step 2: Send emails to LLM for categorization only
-        categorize_prompt = (
-            f"Here are {count} emails to categorize. For each email, assign exactly ONE "
-            f"category from: {allowed_categories}.\n\n"
-            f"{emails_text}\n\n"
-            f"Respond with ONLY a JSON array of objects, no other text:\n"
-            f'[{{"email_id": "...", "label_name": "..."}}, ...]\n'
-            f"Use the sender and subject to decide the category. If unsure, use \"Misc\"."
-        )
+        # Step 2a: Pre-categorize emails deterministically by keyword matching
+        pre_matched, unmatched = _pre_categorize(email_details) if email_details else ([], [])
+        if pre_matched:
+            print(f"  Pre-matched by keywords: {len(pre_matched)} emails")
+            for item in pre_matched:
+                print(f"    {item['email_id'][:8]}... -> {item['label_name']}")
 
-        reply = await run_agent(categorize_prompt, agent, history)
+        # Step 2b: Send only unmatched emails to LLM for categorization
+        mapping = None
+        if unmatched:
+            unmatched_text = _format_unmatched_for_llm(unmatched)
+            prompt_text = (
+                f"Here are {len(unmatched)} emails to categorize. For each email, assign exactly ONE "
+                f"category from: {allowed_categories}.\n\n"
+                f"{unmatched_text}\n\n"
+                f"Respond with ONLY a JSON array of objects, no other text:\n"
+                f'[{{"email_id": "...", "label_name": "..."}}, ...]\n'
+                f"Use the sender and subject to decide the category. If unsure, use \"Misc\"."
+            )
 
-        # Parse the JSON mapping from the LLM reply
-        mapping = _parse_label_mapping(reply)
+            # Warn if prompt is very large for local model
+            prompt_tokens = _estimate_tokens(prompt_text)
+            if prompt_tokens > MAX_HISTORY_TOKENS:
+                print(f"  WARNING: Batch prompt is ~{prompt_tokens} tokens (limit {MAX_HISTORY_TOKENS}). "
+                      f"Consider reducing batch_size if the model produces errors.")
 
-        if not mapping:
-            print("Could not parse categorization from LLM. Raw response:")
-            print(reply)
-            if require_approval:
-                skip = input("Skip this batch? (yes/no): ").strip().lower()
-                if skip in ("yes", "y"):
+            reply = await run_agent(prompt_text, agent, history)
+            llm_mapping = _parse_label_mapping(reply)
+
+            if llm_mapping:
+                mapping = pre_matched + llm_mapping
+            else:
+                print("Could not parse LLM categorization for unmatched emails.")
+                print(f"Raw response: {reply[:200]}...")
+                if pre_matched:
+                    print(f"Proceeding with {len(pre_matched)} pre-matched emails only.")
+                    mapping = pre_matched
+                else:
+                    if require_approval:
+                        skip = input("Skip this batch? (yes/no): ").strip().lower()
+                        if skip in ("yes", "y"):
+                            page_token = next_page_token
+                            if not page_token:
+                                break
+                            continue
                     page_token = next_page_token
                     if not page_token:
                         break
                     continue
-            page_token = next_page_token
-            if not page_token:
-                break
-            continue
+
+            # Trim history between batches to prevent token overflow
+            _trim_history(history, max_tokens=MAX_HISTORY_TOKENS // 2)
+        elif pre_matched:
+            # All emails pre-matched by keywords, no LLM needed
+            print("  All emails matched by keywords — skipping LLM.")
+            mapping = pre_matched
+        else:
+            # No email_details available, fall back to sending all to LLM
+            categorize_prompt = (
+                f"Here are {count} emails to categorize. For each email, assign exactly ONE "
+                f"category from: {allowed_categories}.\n\n"
+                f"{emails_text}\n\n"
+                f"Respond with ONLY a JSON array of objects, no other text:\n"
+                f'[{{"email_id": "...", "label_name": "..."}}, ...]\n'
+                f"Use the sender and subject to decide the category. If unsure, use \"Misc\"."
+            )
+            reply = await run_agent(categorize_prompt, agent, history)
+            mapping = _parse_label_mapping(reply)
+            if not mapping:
+                print("Could not parse categorization from LLM. Raw response:")
+                print(reply[:200])
+                page_token = next_page_token
+                if not page_token:
+                    break
+                continue
+            _trim_history(history, max_tokens=MAX_HISTORY_TOKENS // 2)
 
         # Show summary
         category_counts: dict[str, int] = {}
@@ -462,6 +515,69 @@ def _parse_label_mapping(text: str) -> list[dict] | None:
             valid.append({"email_id": str(item["email_id"]), "label_name": str(item["label_name"])})
 
     return valid if valid else None
+
+
+# ---------------------------------------------------------------------------
+# Token management for local models
+# ---------------------------------------------------------------------------
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count estimate (~4 chars per token)."""
+    return len(text) // 4
+
+
+def _trim_history(history: list, max_tokens: int = MAX_HISTORY_TOKENS):
+    """Remove oldest messages when history exceeds token budget for local model."""
+    total = sum(_estimate_tokens(msg.get("content", "")) for msg in history)
+    while total > max_tokens and len(history) > 2:
+        removed = history.pop(0)
+        total -= _estimate_tokens(removed.get("content", ""))
+
+
+# ---------------------------------------------------------------------------
+# Deterministic pre-categorization by keyword matching
+# ---------------------------------------------------------------------------
+
+def _pre_categorize(email_details: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Match emails against EMAIL_CATEGORIES keywords before sending to LLM.
+
+    Returns (matched, unmatched) where matched is [{email_id, label_name}, ...].
+    """
+    matched = []
+    unmatched = []
+    for email in email_details:
+        sender = email.get("from", "").lower()
+        subject = email.get("subject", "").lower()
+        searchable = f"{sender} {subject}"
+
+        assigned = None
+        for category, keywords in EMAIL_CATEGORIES.items():
+            for kw in keywords:
+                if kw.lower() in searchable:
+                    assigned = category
+                    break
+            if assigned:
+                break
+
+        if assigned:
+            matched.append({"email_id": email["email_id"], "label_name": assigned})
+        else:
+            unmatched.append(email)
+
+    return matched, unmatched
+
+
+def _format_unmatched_for_llm(unmatched: list[dict]) -> str:
+    """Format unmatched email details for LLM categorization."""
+    lines = []
+    for i, email in enumerate(unmatched, 1):
+        lines.append(
+            f"{i}. ID: {email['email_id']}\n"
+            f"   From: {email.get('from', 'Unknown')}\n"
+            f"   Subject: {email.get('subject', '(no subject)')}\n"
+            f"   Snippet: {email.get('snippet', '')}\n"
+        )
+    return "\n".join(lines) if lines else "No emails to categorize."
 
 
 # ---------------------------------------------------------------------------

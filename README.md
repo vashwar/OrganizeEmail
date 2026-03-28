@@ -102,6 +102,7 @@ The `.env` file is pre-configured with defaults. You can customize:
 LLM_BASE_URL=http://127.0.0.1:1234/v1
 LLM_MODEL=qwen3-4b
 EMAIL_CATEGORIES={"Jobs": ["linkedin", "recruiter"], "Bills": ["utility", "invoice"], ...}
+MAX_HISTORY_TOKENS=3000   # Token budget for conversation history (tune for your model's context window)
 ```
 
 ## Usage
@@ -125,7 +126,7 @@ Fetches your unread emails, sends them to the local LLM for analysis, and presen
 Archives all inbox emails older than a specified number of years. Processes in batches of 500 to respect Gmail API limits.
 
 ### Option 3: Categorize Historical Archive
-Pages through up to 5 years of inbox history in batches of 10. Each batch is sent to the local LLM for categorization, then labels are applied and emails are archived. Already-labeled emails are automatically skipped. Supports both manual approval per batch and auto-apply modes.
+Pages through up to 5 years of inbox history in batches of 10. Emails are first **pre-categorized deterministically** by keyword/sender matching against your configured categories — only unmatched emails are sent to the local LLM. This makes sender-based rules (e.g. `onboarding@resend.dev` → `NewsSummary`) 100% reliable and reduces LLM token usage. Labels are applied and emails are archived. Already-labeled emails are automatically skipped. Supports both manual approval per batch and auto-apply modes.
 
 ## Email Categories
 
@@ -143,6 +144,8 @@ Default categories (customizable via `.env`):
 | Banks/Investment | bank, chase, credit card, venmo |
 | Social Media | facebook, instagram, twitter |
 | Newsletters | substack, medium, newsletter |
+| Family | specific email addresses |
+| NewsSummary | onboarding@resend.dev |
 | Promotions | sale, coupon, promo, deal |
 | Misc | anything that doesn't match above |
 
